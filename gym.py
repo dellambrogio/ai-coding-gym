@@ -101,7 +101,10 @@ SESSION_VSCODE_SETTINGS = {
     "terminal.integrated.env.osx": {"PATH": f"{Path(sys.executable).parent}:${{env:PATH}}"},
 }
 
-TEST_MINE = '''"""Your own tests (Tests phase, minutes 5-10). Run: python3 -m pytest test_mine.py -q"""
+TEST_MINE = '''"""Your own tests (Tests phase, minutes 5-10). Run:
+
+python3 -m pytest test_mine.py -q
+"""
 import {module}
 
 
