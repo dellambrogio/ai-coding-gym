@@ -256,16 +256,18 @@ function render() {
 }
 
 function renderStatusBar() {
-  if (!status) {
+  // A finished session stays reachable from the menu (review, discard), but the button is idle again.
+  if (!status || status.finished) {
     statusBar.text = "$(mortar-board) AI Coding Gym";
-    statusBar.tooltip = "Start a mock AI-assisted coding interview";
+    statusBar.tooltip = status
+      ? `Last session: ${status.title} (finished). Click to start a new one or get its review.`
+      : "Start a mock interview or a practice session";
     statusBar.backgroundColor = undefined;
     return;
   }
   if (isPractice()) {
     const { label, detail } = coachingSummary();
-    const done = status.finished ? " · finished" : "";
-    statusBar.text = `$(mortar-board) Practice · Part ${status.part}/${status.parts} · ${label.replace("Last prompt: ", "")}${done}`;
+    statusBar.text = `$(mortar-board) Practice · Part ${status.part}/${status.parts} · ${label.replace("Last prompt: ", "")}`;
     statusBar.tooltip = new vscode.MarkdownString(
       `**${status.title}** (practice, no clock)\n\n${label}, ${detail}\n\nClick for actions.`);
     statusBar.backgroundColor = undefined;
@@ -275,8 +277,7 @@ function renderStatusBar() {
   const total = Math.floor(minutes * 60);
   const clock = `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
   const phase = phaseOf(minutes);
-  const done = status.finished ? " · finished" : "";
-  statusBar.text = `$(watch) ${clock} ${phase} · Part ${status.part}/${status.parts}${done}`;
+  statusBar.text = `$(watch) ${clock} ${phase} · Part ${status.part}/${status.parts}`;
   statusBar.tooltip = new vscode.MarkdownString(
     `**${status.title}**\n\n` +
       PHASES.map(([end, name, hint], i) => {
@@ -286,15 +287,13 @@ function renderStatusBar() {
       }).join("\n\n") +
       "\n\nClick for actions."
   );
-  statusBar.backgroundColor = status.finished
-    ? undefined
-    : phase === "Overtime"
+  statusBar.backgroundColor = phase === "Overtime"
       ? new vscode.ThemeColor("statusBarItem.errorBackground")
       : phase === "Verify" || phase === "Explain"
         ? new vscode.ThemeColor("statusBarItem.warningBackground")
         : undefined;
 
-  if (!status.finished && phase !== lastPhase) {
+  if (phase !== lastPhase) {
     lastPhase = phase;
     const hint = PHASES.find(([, name]) => name === phase)?.[2] ?? "Time's up. Wrap up and explain your solution.";
     vscode.window.showInformationMessage(`AI Coding Gym: ${phase} phase. ${hint}`);
@@ -358,7 +357,7 @@ class GymView implements vscode.TreeDataProvider<vscode.TreeItem> {
   // Called every second: the clock goes in the header, the tree is rebuilt only when it changes.
   update() {
     if (treeView) {
-      treeView.description = status ? statusBar.text.replace(/^\$\([a-z-]+\) /, "") : "";
+      treeView.description = status && !status.finished ? statusBar.text.replace(/^\$\([a-z-]+\) /, "") : "";
     }
     const key = JSON.stringify([status?.session, status?.part, status?.finished, phaseOf(elapsedMinutes()),
       lastCheck?.passed, lastCheck?.total, returnFolder(), coachingSummary()]);
