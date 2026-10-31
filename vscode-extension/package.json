@@ -1,7 +1,7 @@
 {
   "name": "ai-coding-gym",
   "displayName": "AI Coding Gym",
-  "description": "AI Coding Gym: timed mock AI-assisted coding interviews with staged problems, hidden tests and a Claude review.",
+  "description": "AI Coding Gym: mock AI-assisted coding interviews with staged problems, hidden tests and a Claude review, plus a practice mode that grades every prompt.",
   "version": "0.1.0",
   "publisher": "local",
   "private": true,
@@ -23,8 +23,12 @@
         "icon": "$(list-unordered)"
       },
       {
-        "command": "aiCodingGym.start",
-        "title": "AI Coding Gym: Start"
+        "command": "aiCodingGym.startInterview",
+        "title": "AI Coding Gym: Start New Mock Interview Session"
+      },
+      {
+        "command": "aiCodingGym.startPractice",
+        "title": "AI Coding Gym: Start New Practice Session"
       },
       {
         "command": "aiCodingGym.check",
@@ -39,6 +43,10 @@
       {
         "command": "aiCodingGym.showProblem",
         "title": "AI Coding Gym: Show Problem"
+      },
+      {
+        "command": "aiCodingGym.showCoaching",
+        "title": "AI Coding Gym: Show Prompt Coaching"
       },
       {
         "command": "aiCodingGym.openClaude",

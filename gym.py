@@ -4,16 +4,20 @@
 Commands (add --json for machine-readable output, used by the VS Code extension):
   list                 list problems
   start [problem]      start a session (random problem if omitted)
+                       --practice: no clock; every prompt to Claude is graded -> coaching.md
   status               show current session
   check                run hidden tests for parts revealed so far
   next                 reveal the next part
   finish               final test run, export Claude transcript
   review               ask Claude (claude -p) to grade the session -> review.md
+  coach-hook DIR       Claude Code UserPromptSubmit hook (practice mode): queue the prompt
+  coach DIR N          grade prompt N in the background (started by coach-hook)
   discard              delete the current session
   clean                delete all sessions except the current one
 """
 import argparse
 import difflib
+import fcntl
 import json
 import os
 import random
@@ -31,6 +35,7 @@ PROBLEMS = ROOT / "problems"
 SESSIONS = ROOT / "sessions"
 CURRENT = SESSIONS / ".current"
 CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
+COACH_MODEL = os.environ.get("AI_CODING_GYM_COACH_MODEL", "sonnet")
 
 PHASES = [  # (end minute, name)
     (5, "Clarify"),
@@ -85,6 +90,8 @@ SESSION_VSCODE_SETTINGS = {
         "CLAUDE.md": True,
         "session.json": True,
         "results.json": True,
+        "coaching.json": True,
+        ".coaching.lock": True,
         "requirements.txt": True,
     },
     # The interpreter running gym.py has pytest; use it for imports and tests in the session.
@@ -175,10 +182,21 @@ def status_of(d):
         "started": s["started"],
         "finished": s.get("finished"),
         "elapsed_seconds": int(elapsed),
-        "phase": phase(elapsed / 60),
+        "mode": s.get("mode", "interview"),
+        "phase": "Practice" if s.get("mode") == "practice" else phase(elapsed / 60),
         "problem_file": str(d / "problem.md"),
         "solution_file": str(d / s.get("main", "solution.py")),
+        "coaching_file": str(d / "coaching.md"),
     }
+
+
+def session_settings(d, practice):
+    settings = dict(SESSION_SETTINGS)
+    if practice:
+        # Grade every prompt the candidate sends. The hook only queues it and returns at once.
+        hook = f'"{sys.executable}" "{ROOT / "gym.py"}" coach-hook "{d}"'
+        settings["hooks"] = {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": hook}]}]}
+    return settings
 
 
 def require_session():
@@ -214,7 +232,7 @@ def cmd_start(args):
     # Claude Code started in the session folder picks these up: assistant role + no peeking.
     (d / "CLAUDE.md").write_text(rules)
     (d / ".claude").mkdir()
-    (d / ".claude" / "settings.json").write_text(json.dumps(SESSION_SETTINGS, indent=2))
+    (d / ".claude" / "settings.json").write_text(json.dumps(session_settings(d, args.practice), indent=2))
     (d / ".vscode").mkdir()
     (d / ".vscode" / "settings.json").write_text(json.dumps(SESSION_VSCODE_SETTINGS, indent=2))
     s = {
@@ -223,11 +241,16 @@ def cmd_start(args):
         "part": 1,
         "parts": len(problem_parts(name)),
         "main": main,
+        "mode": "practice" if args.practice else "interview",
+        # The coach runs from Claude Code's hook, whose PATH may not include claude.
+        "claude": os.environ.get("AI_CODING_GYM_CLAUDE") or shutil.which("claude"),
         "started": now().isoformat(),
         "events": [],
     }
     log(s, "start")
     save_session(d, s)
+    if args.practice:
+        save_coaching(d, [])
     CURRENT.write_text(d.name)
     return status_of(d)
 
@@ -441,6 +464,172 @@ def starter_diff(d, name):
     return "".join(out) or "(no changes)"
 
 
+# ---- practice mode: prompt coaching ----
+
+COACH_PROMPT = """You coach a candidate practicing AI-assisted coding interviews. They work on the
+problem below with an AI coding assistant (Claude Code) and are judged on how they work with it.
+Grade the candidate's latest prompt to the assistant, in the context of the conversation so far.
+
+What a strong prompt does:
+- Has one clear goal, scoped to a step the candidate can review (not "solve the problem").
+- Gives the context the assistant needs: files, functions, inputs/outputs, constraints, errors.
+- Shows ownership: the candidate states the approach or decision; the AI executes or critiques it.
+- Asks for verification when it fits: tests, edge cases, complexity, or an explanation to check.
+- Says what to leave alone and what form the answer should take, when that matters.
+Short prompts are fine when the context makes them unambiguous ("run the tests", "yes, do that").
+
+Write the better prompt as the candidate should have sent it at this exact moment: same intent,
+realistic length, their voice. Improve how they ask, not what they know: don't add algorithmic
+insights they haven't shown; use a placeholder like <your approach> for a decision only they can
+make. If the prompt was already strong, say so and keep the better prompt close to the original.
+"""
+
+COACH_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "grade": {"type": "string", "enum": ["A", "B", "C", "D", "F"]},
+        "score": {"type": "integer", "minimum": 1, "maximum": 10},
+        "verdict": {"type": "string", "description": "One sentence."},
+        "good": {"type": "array", "items": {"type": "string"}, "description": "What worked, 0-3 short points."},
+        "missing": {"type": "array", "items": {"type": "string"}, "description": "What to fix, 0-3 short points."},
+        "better_prompt": {"type": "string"},
+    },
+    "required": ["grade", "score", "verdict", "good", "missing", "better_prompt"],
+}
+
+
+class coach_lock:
+    """Serialize updates to coaching.json: grades can land while another prompt is queued."""
+
+    def __init__(self, d):
+        self.path = d / ".coaching.lock"
+
+    def __enter__(self):
+        self.f = open(self.path, "w")
+        fcntl.flock(self.f, fcntl.LOCK_EX)
+
+    def __exit__(self, *exc):
+        self.f.close()
+
+
+def load_coaching(d):
+    f = d / "coaching.json"
+    return json.loads(f.read_text()) if f.exists() else []
+
+
+def save_coaching(d, entries):
+    (d / "coaching.json").write_text(json.dumps(entries, indent=2))
+    (d / "coaching.md").write_text(render_coaching(entries))
+
+
+def quote(text):
+    return "\n".join("> " + line if line else ">" for line in text.strip().splitlines())
+
+
+def render_coaching(entries):
+    graded = [e for e in entries if e["status"] == "done"]
+    lines = ["# Prompt coaching", ""]
+    if graded:
+        avg = sum(e["score"] for e in graded) / len(graded)
+        lines.append(f"**{len(graded)} prompt(s) graded, average {avg:.1f}/10.** Newest first.")
+    else:
+        lines.append("Every prompt you send to Claude in this session is graded here, newest first.")
+    for e in reversed(entries):
+        when = f"{parse_ts(e['t']).astimezone():%H:%M}"
+        if e["status"] == "grading":
+            lines += ["", f"## #{e['n']} · {when} · grading…", "", quote(e["prompt"])]
+            continue
+        if e["status"] == "error":
+            lines += ["", f"## #{e['n']} · {when} · not graded", "", quote(e["prompt"]), "", f"_{e['error']}_"]
+            continue
+        lines += ["", f"## #{e['n']} · {when} · {e['grade']} ({e['score']}/10)", "", f"*{e['verdict']}*",
+                  "", "**You wrote**", "", quote(e["prompt"]), "", "**Better prompt**", "", quote(e["better_prompt"])]
+        for title, key in (("What worked", "good"), ("What to fix", "missing")):
+            if e[key]:
+                lines += ["", f"**{title}**", ""] + [f"- {x}" for x in e[key]]
+    return "\n".join(lines) + "\n"
+
+
+def cmd_coach_hook(args):
+    d = Path(args.dir)
+    try:
+        prompt = json.load(sys.stdin).get("prompt", "").strip()
+    except json.JSONDecodeError:
+        return None
+    if not prompt or prompt.startswith("/") or not (d / "session.json").exists():
+        return None  # empty, a slash command, or the session was deleted
+    with coach_lock(d):
+        entries = load_coaching(d)
+        n = len(entries) + 1
+        entries.append({"n": n, "t": now().isoformat(), "prompt": prompt, "status": "grading"})
+        save_coaching(d, entries)
+    subprocess.Popen([sys.executable, str(ROOT / "gym.py"), "coach", str(d), str(n)],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True)
+    return None  # a UserPromptSubmit hook's stdout goes into Claude's context: print nothing
+
+
+def conversation_before(d, t, limit=12000):
+    """The candidate's conversation with Claude in this session up to time t, most recent last."""
+    start = parse_ts(load_session(d)["started"])
+    lines = []
+    for f in CLAUDE_PROJECTS.glob("*/*.jsonl"):
+        if datetime.fromtimestamp(f.stat().st_mtime, timezone.utc) < start:
+            continue
+        for raw in f.open():
+            try:
+                rec = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if rec.get("type") not in ("user", "assistant") or rec.get("isSidechain"):
+                continue
+            if not Path(str(rec.get("cwd", "/"))).is_relative_to(d) or "timestamp" not in rec:
+                continue
+            ts = parse_ts(rec["timestamp"])
+            if start <= ts < t:
+                lines += [(ts, "**" + text) for text in render(rec)]
+    lines.sort(key=lambda x: x[0])
+    text = "\n\n".join(x for _, x in lines)
+    return text[-limit:] if text else "(no earlier messages)"
+
+
+def cmd_coach(args):
+    d = Path(args.dir)
+    s = load_session(d)
+    entry = next(e for e in load_coaching(d) if e["n"] == args.n)
+    main = d / s.get("main", "solution.py")
+    code = main.read_text()[:8000] if main.exists() else ""
+    context = "\n\n".join([
+        COACH_PROMPT,
+        "## Problem (parts revealed so far)\n" + (d / "problem.md").read_text(),
+        f"## Current {main.name}\n```python\n{code}\n```",
+        "## Conversation so far\n" + conversation_before(d, parse_ts(entry["t"])),
+        "## The prompt to grade\n" + entry["prompt"],
+    ])
+    result = {"status": "error", "error": "claude CLI not found"}
+    claude = s.get("claude") or shutil.which("claude")
+    if claude:
+        # Outside the session folder and without project settings, so this run doesn't trigger
+        # the hook again or show up in the session transcript.
+        proc = subprocess.run(
+            [claude, "-p", "--model", COACH_MODEL, "--tools", "", "--no-session-persistence",
+             "--setting-sources", "user", "--output-format", "json", "--json-schema", json.dumps(COACH_SCHEMA),
+             "Grade the prompt as instructed in the input."],
+            input=context, capture_output=True, text=True, cwd=tempfile.gettempdir(), timeout=300)
+        try:
+            out = json.loads(proc.stdout)
+            result = {"status": "done", **out["structured_output"]}
+        except (json.JSONDecodeError, KeyError, TypeError):
+            result = {"status": "error", "error": (proc.stderr or proc.stdout).strip()[-300:] or "no output"}
+    with coach_lock(d):
+        entries = load_coaching(d)
+        for e in entries:
+            if e["n"] == args.n:
+                e.update(result)
+        save_coaching(d, entries)
+    return None
+
+
 def cmd_discard(args):
     d = require_session()
     shutil.rmtree(d)
@@ -485,13 +674,21 @@ def main():
     sub.add_parser("list")
     sp = sub.add_parser("start")
     sp.add_argument("problem", nargs="?")
+    sp.add_argument("--practice", action="store_true", help="no clock; grade every prompt to Claude")
+    sp = sub.add_parser("coach-hook")
+    sp.add_argument("dir")
+    sp = sub.add_parser("coach")
+    sp.add_argument("dir")
+    sp.add_argument("n", type=int)
     for c in ("status", "check", "next", "finish", "review", "discard", "clean"):
         sub.add_parser(c)
     args = ap.parse_args()
     handlers = {"list": lambda a: list_problems(), "start": cmd_start, "status": cmd_status,
                 "check": cmd_check, "next": cmd_next, "finish": cmd_finish, "review": cmd_review,
-                "discard": cmd_discard, "clean": cmd_clean}
+                "discard": cmd_discard, "clean": cmd_clean, "coach-hook": cmd_coach_hook, "coach": cmd_coach}
     out = handlers[args.cmd](args)
+    if out is None:
+        return
     print(json.dumps(out) if args.json else fmt(args.cmd, out))
 
 

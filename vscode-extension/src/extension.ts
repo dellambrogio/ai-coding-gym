@@ -13,9 +13,20 @@ interface Status {
   started: string;
   finished: string | null;
   elapsed_seconds: number;
+  mode: "interview" | "practice";
   phase: string;
   problem_file: string;
   solution_file: string;
+  coaching_file: string;
+}
+
+// One entry of coaching.json, written by gym.py's prompt coach in practice mode.
+interface Coaching {
+  n: number;
+  prompt: string;
+  status: "grading" | "done" | "error";
+  grade?: string;
+  score?: number;
 }
 
 interface TestResult {
@@ -49,6 +60,8 @@ let extensionContext: vscode.ExtensionContext;
 let lastCheck: CheckResult | undefined;
 let view: GymView;
 let treeView: vscode.TreeView<vscode.TreeItem>;
+let coaching: Coaching[] = [];
+let coachingWatcher: vscode.FileSystemWatcher | undefined;
 
 export function activate(context: vscode.ExtensionContext) {
   extensionContext = context;
@@ -62,10 +75,12 @@ export function activate(context: vscode.ExtensionContext) {
 
   const commands: [string, () => Promise<void>][] = [
     ["aiCodingGym.menu", menu],
-    ["aiCodingGym.start", start],
+    ["aiCodingGym.startInterview", () => start(false)],
+    ["aiCodingGym.startPractice", () => start(true)],
     ["aiCodingGym.check", check],
     ["aiCodingGym.next", next],
     ["aiCodingGym.showProblem", showProblem],
+    ["aiCodingGym.showCoaching", showCoaching],
     ["aiCodingGym.openClaude", openClaude],
     ["aiCodingGym.finish", finish],
     ["aiCodingGym.review", review],
@@ -77,7 +92,8 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(vscode.commands.registerCommand(id, () => fn().catch(showError)));
   }
   const timer = setInterval(render, 1000);
-  context.subscriptions.push(statusBar, output, { dispose: () => clearInterval(timer) });
+  context.subscriptions.push(statusBar, output, { dispose: () => clearInterval(timer) },
+    { dispose: () => coachingWatcher?.dispose() });
 
   // Resume a session that was running when VS Code closed. In a session's own window,
   // set it up the first time the window opens.
@@ -85,6 +101,7 @@ export function activate(context: vscode.ExtensionContext) {
     .then(async (s) => {
       status = s;
       lastPhase = phaseOf(elapsedMinutes());
+      watchCoaching();
       if (!s.finished && isSessionWindow(s) && !context.workspaceState.get<boolean>("aiCodingGym.setUp")) {
         await context.workspaceState.update("aiCodingGym.setUp", true);
         render();
@@ -162,7 +179,7 @@ function isSessionWindow(s: Status): boolean {
 
 function requireSession(): Status {
   if (!status) {
-    throw new Error("No active session. Run 'AI Coding Gym: Start'.");
+    throw new Error("No active session. Start one from the AI Coding Gym menu in the status bar.");
   }
   return status;
 }
@@ -178,7 +195,59 @@ function elapsedMinutes(): number {
 }
 
 function phaseOf(minutes: number): string {
+  if (status?.mode === "practice") {
+    return "Practice";
+  }
   return PHASES.find(([end]) => minutes < end)?.[1] ?? "Overtime";
+}
+
+function isPractice(): boolean {
+  return status?.mode === "practice";
+}
+
+// ---- prompt coaching (practice mode) ----
+
+// Follow coaching.json: the sidebar shows the latest grade, the preview of coaching.md refreshes.
+function watchCoaching() {
+  coachingWatcher?.dispose();
+  coachingWatcher = undefined;
+  coaching = [];
+  if (!status || !isPractice()) {
+    return;
+  }
+  const dir = status.dir;
+  const reload = () => {
+    try {
+      coaching = JSON.parse(fs.readFileSync(path.join(dir, "coaching.json"), "utf8")) as Coaching[];
+    } catch {
+      coaching = [];
+    }
+    render();
+  };
+  coachingWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(vscode.Uri.file(dir), "coaching.json"));
+  const changed = () => {
+    reload();
+    // The preview's file watcher can miss rewrites, so refresh it explicitly.
+    vscode.commands.executeCommand("markdown.preview.refresh");
+  };
+  coachingWatcher.onDidChange(changed);
+  coachingWatcher.onDidCreate(changed);
+  reload();
+}
+
+function coachingSummary(): { label: string; detail: string } {
+  const graded = coaching.filter((c) => c.status === "done");
+  const pending = coaching.filter((c) => c.status === "grading").length;
+  const grading = pending ? ` · grading ${pending}…` : "";
+  if (!graded.length) {
+    return { label: "Prompts: none graded yet", detail: pending ? `grading ${pending}…` : "send Claude a prompt" };
+  }
+  const last = graded[graded.length - 1];
+  const avg = graded.reduce((sum, c) => sum + (c.score ?? 0), 0) / graded.length;
+  return {
+    label: `Last prompt: ${last.grade} (${last.score}/10)`,
+    detail: `avg ${avg.toFixed(1)} over ${graded.length}${grading}`,
+  };
 }
 
 function render() {
@@ -190,6 +259,15 @@ function renderStatusBar() {
   if (!status) {
     statusBar.text = "$(mortar-board) AI Coding Gym";
     statusBar.tooltip = "Start a mock AI-assisted coding interview";
+    statusBar.backgroundColor = undefined;
+    return;
+  }
+  if (isPractice()) {
+    const { label, detail } = coachingSummary();
+    const done = status.finished ? " · finished" : "";
+    statusBar.text = `$(mortar-board) Practice · Part ${status.part}/${status.parts} · ${label.replace("Last prompt: ", "")}${done}`;
+    statusBar.tooltip = new vscode.MarkdownString(
+      `**${status.title}** (practice, no clock)\n\n${label}, ${detail}\n\nClick for actions.`);
     statusBar.backgroundColor = undefined;
     return;
   }
@@ -238,13 +316,15 @@ function actions(): Action[] {
         { icon: "beaker", label: "Run hidden tests", command: "aiCodingGym.check" },
         { icon: "arrow-right", label: "Next part", command: "aiCodingGym.next" },
         { icon: "book", label: "Show problem", command: "aiCodingGym.showProblem" },
+        ...(isPractice() ? [{ icon: "lightbulb", label: "Show prompt coaching", command: "aiCodingGym.showCoaching" }] : []),
         { icon: "terminal", label: "Open Claude in session", command: "aiCodingGym.openClaude" },
         { icon: "check-all", label: "Finish", command: "aiCodingGym.finish" },
         { icon: "discard", label: "Discard current session", command: "aiCodingGym.discard" },
         { icon: "trash", label: "Delete all previous sessions", command: "aiCodingGym.clean" },
       ]
     : [
-        { icon: "play", label: "Start new session", command: "aiCodingGym.start" },
+        { icon: "play", label: "Start new mock interview session", command: "aiCodingGym.startInterview" },
+        { icon: "lightbulb", label: "Start new practice session", command: "aiCodingGym.startPractice" },
         ...(status
           ? [
               { icon: "comment-discussion", label: "Get Claude review", command: "aiCodingGym.review" },
@@ -278,10 +358,10 @@ class GymView implements vscode.TreeDataProvider<vscode.TreeItem> {
   // Called every second: the clock goes in the header, the tree is rebuilt only when it changes.
   update() {
     if (treeView) {
-      treeView.description = status ? statusBar.text.replace("$(watch) ", "") : "";
+      treeView.description = status ? statusBar.text.replace(/^\$\([a-z-]+\) /, "") : "";
     }
     const key = JSON.stringify([status?.session, status?.part, status?.finished, phaseOf(elapsedMinutes()),
-      lastCheck?.passed, lastCheck?.total, returnFolder()]);
+      lastCheck?.passed, lastCheck?.total, returnFolder(), coachingSummary()]);
     if (key !== this.shown) {
       this.shown = key;
       this.changed.fire(undefined);
@@ -305,7 +385,15 @@ class GymView implements vscode.TreeDataProvider<vscode.TreeItem> {
         tooltip: "Show the problem",
         command: { command: "aiCodingGym.showProblem", title: "Show problem" },
       }));
-      if (!status.finished) {
+      if (isPractice()) {
+        const { label, detail } = coachingSummary();
+        items.push(item(label, {
+          description: detail,
+          icon: "lightbulb",
+          tooltip: "Show the prompt coaching: grades and better prompts",
+          command: { command: "aiCodingGym.showCoaching", title: "Show prompt coaching" },
+        }));
+      } else if (!status.finished) {
         items.push(item(phase, {
           description: PHASES.find(([, name]) => name === phase)?.[2] ?? "Time's up. Wrap up and explain your solution.",
           icon: "watch",
@@ -345,7 +433,7 @@ async function menu() {
   }
 }
 
-async function start() {
+async function start(practice: boolean) {
   if (status && !status.finished) {
     const ok = await vscode.window.showWarningMessage(
       `A session (${status.title}) is still running. Abandon it?`, { modal: true }, "Start new");
@@ -364,7 +452,9 @@ async function start() {
   if (!pick) {
     return;
   }
-  status = await runMock<Status>(extensionContext, pick.name ? ["start", pick.name] : ["start"]);
+  status = await runMock<Status>(extensionContext,
+    ["start", ...(pick.name ? [pick.name] : []), ...(practice ? ["--practice"] : [])]);
+  watchCoaching();
   lastCheck = undefined;
   lastPhase = phaseOf(0);
   render();
@@ -403,16 +493,47 @@ async function setUpSession(s: Status) {
   await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Two, preview: false });
   // Opens beside the active group (solution.py), so it lands in the third column.
   await showProblem().catch(showError);
+  if (s.mode === "practice") {
+    await showCoaching().catch(showError);
+  }
   // Put the cursor back in solution.py.
   await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Two, preview: false });
-  vscode.window.showInformationMessage(
-    `AI Coding Gym session started: ${s.title}. Clarify phase (0–5 min): no AI yet.`);
+  vscode.window.showInformationMessage(s.mode === "practice"
+    ? `AI Coding Gym practice: ${s.title}. No clock. Each prompt you send Claude is graded in the coaching panel.`
+    : `AI Coding Gym session started: ${s.title}. Clarify phase (0–5 min): no AI yet.`);
+}
+
+// A static markdown preview: bound to its file, so it keeps showing it whichever markdown file
+// becomes active, and it opens in the given column (markdown.showPreview picks its own).
+async function showMarkdown(file: string, column: vscode.ViewColumn) {
+  await vscode.commands.executeCommand("vscode.openWith", vscode.Uri.file(file), "vscode.markdown.preview.editor",
+    { viewColumn: column, preview: false });
+}
+
+function previewTab(file: string): vscode.Tab | undefined {
+  return vscode.window.tabGroups.all.flatMap((g) => g.tabs).find((t) =>
+    t.input instanceof vscode.TabInputCustom && t.input.uri.fsPath === file);
 }
 
 async function showProblem() {
   const s = requireSession();
-  // Locked, so it keeps showing the problem when another markdown file becomes active.
-  await vscode.commands.executeCommand("markdown.showLockedPreviewToSide", vscode.Uri.file(s.problem_file));
+  await showMarkdown(s.problem_file, previewTab(s.problem_file)?.group.viewColumn ?? vscode.ViewColumn.Beside);
+}
+
+async function showCoaching() {
+  const s = requireSession();
+  if (s.mode !== "practice") {
+    throw new Error("Prompt coaching is only on in practice sessions.");
+  }
+  const open = previewTab(s.coaching_file);
+  if (open) {
+    await showMarkdown(s.coaching_file, open.group.viewColumn);
+    return;
+  }
+  // Under the problem: focus its group, split it horizontally, open the coaching in the new group.
+  await showProblem();
+  await vscode.commands.executeCommand("workbench.action.newGroupBelow");
+  await showMarkdown(s.coaching_file, vscode.ViewColumn.Active);
 }
 
 async function openClaude() {
@@ -516,7 +637,9 @@ async function next() {
 async function finish() {
   const s = requireSession();
   const ok = await vscode.window.showWarningMessage(
-    `Finish ${s.title}? The timer stops and the final hidden tests run.`, { modal: true }, "Finish");
+    s.mode === "practice"
+      ? `Finish ${s.title}? The final hidden tests run.`
+      : `Finish ${s.title}? The timer stops and the final hidden tests run.`, { modal: true }, "Finish");
   if (!ok) {
     return;
   }
@@ -567,6 +690,7 @@ async function discard() {
   }
   status = undefined;
   lastCheck = undefined;
+  watchCoaching();
   render();
   vscode.window.showInformationMessage(`AI Coding Gym: ${r.message}`);
 }
@@ -592,7 +716,7 @@ async function closeSession(s: Status) {
       return inSession(input.uri);
     }
     // The markdown preview is a webview tab with no URI; match it by its title.
-    return input instanceof vscode.TabInputWebview && t.label.includes("problem.md");
+    return input instanceof vscode.TabInputWebview && (t.label.includes("problem.md") || t.label.includes("coaching.md"));
   });
   await vscode.window.tabGroups.close(tabs);
 }

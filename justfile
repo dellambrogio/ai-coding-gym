@@ -44,6 +44,10 @@ list:
 start problem="":
     {{gym}} start {{problem}}
 
+# Start a practice session: no clock, every prompt to Claude graded in coaching.md
+practice problem="":
+    {{gym}} start {{problem}} --practice
+
 # Show the current session
 status:
     {{gym}} status
