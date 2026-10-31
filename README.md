@@ -65,13 +65,13 @@ Then reload any open VS Code windows: **Ctrl+Shift+P**, then **Developer: Reload
    - The **AI Coding Gym** section in the Explorer, below the files, shows the clock, the part, the last test results and the actions. Its title bar has buttons for the tests, the next part and the menu.
    - **Ctrl+Alt+T** runs the hidden tests for every part revealed so far. When they all pass, you're offered the next part.
    - Clicking the timer shows the menu: hidden tests, next part, show problem, reopen Claude, finish, discard the current session, delete all previous sessions.
-   - Run your own tests from the session folder with `python -m pytest test_mine.py -q`. In codebase problems, `python -m pytest tests -q` runs the visible tests.
+   - Run your own tests from the session folder with `python3 -m pytest test_mine.py -q`. In codebase problems, `python3 -m pytest tests -q` runs the visible tests. Terminals in the session window have the gym's `.venv` first on `PATH`, so `python3` there has pytest.
 5. When you're done, click **Finish**. This stops the timer, runs the final tests and exports your Claude conversation to `transcript.md`.
 6. Then click **Get review**. This runs `claude -p` on the problem, your code, the test results, the event times and the transcript, and writes `review.md` (takes about a minute).
 
 ## Practice mode
 
-Practice sessions have no clock. The session's `.claude/settings.json` adds a `UserPromptSubmit` hook: each prompt you send to Claude in that session is queued and returns at once, and a background `claude -p` (model `sonnet`, override with `AI_CODING_GYM_COACH_MODEL`) grades it against the problem, your code and the conversation so far. The result lands in `coaching.md`, newest first: a grade (A–F, score out of 10), a one-line verdict, the better prompt, what worked and what to fix. It usually takes 10–20 seconds.
+Practice sessions have no clock. The session's `.claude/settings.json` adds a `UserPromptSubmit` hook: each prompt you send to Claude in that session is queued and returns at once, and a background `claude -p` (model `sonnet`, override with `AI_CODING_GYM_COACH_MODEL`) grades it against the problem, your code and the conversation so far. The result lands in `coaching.md`, newest first: a score out of 10 against an anchored scale (A = 9–10, B = 7–8, C = 5–6, D = 3–4, F = 1–2), a one-line verdict, the better prompt (at most 1.5× the length of yours), what worked and what to fix. It usually takes 10–20 seconds.
 
 The coaching preview opens under the problem; **Show prompt coaching** in the menu reopens it. The status bar and the Explorer section show the last grade and the average. Slash commands aren't graded. Hidden tests, next part, finish and review work as in interview mode.
 

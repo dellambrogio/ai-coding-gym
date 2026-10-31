@@ -96,9 +96,12 @@ SESSION_VSCODE_SETTINGS = {
     },
     # The interpreter running gym.py has pytest; use it for imports and tests in the session.
     "python.defaultInterpreterPath": sys.executable,
+    # Terminals in the session window find the same interpreter first: python3 -m pytest works.
+    "terminal.integrated.env.linux": {"PATH": f"{Path(sys.executable).parent}:${{env:PATH}}"},
+    "terminal.integrated.env.osx": {"PATH": f"{Path(sys.executable).parent}:${{env:PATH}}"},
 }
 
-TEST_MINE = '''"""Your own tests (Tests phase, minutes 5-10). Run: python -m pytest test_mine.py -q"""
+TEST_MINE = '''"""Your own tests (Tests phase, minutes 5-10). Run: python3 -m pytest test_mine.py -q"""
 import {module}
 
 
@@ -470,32 +473,54 @@ COACH_PROMPT = """You coach a candidate practicing AI-assisted coding interviews
 problem below with an AI coding assistant (Claude Code) and are judged on how they work with it.
 Grade the candidate's latest prompt to the assistant, in the context of the conversation so far.
 
-What a strong prompt does:
+What a strong prompt does, when it applies:
 - Has one clear goal, scoped to a step the candidate can review (not "solve the problem").
-- Gives the context the assistant needs: files, functions, inputs/outputs, constraints, errors.
+- Gives the context the assistant can't infer: files, functions, inputs/outputs, constraints, errors.
 - Shows ownership: the candidate states the approach or decision; the AI executes or critiques it.
 - Asks for verification when it fits: tests, edge cases, complexity, or an explanation to check.
-- Says what to leave alone and what form the answer should take, when that matters.
-Short prompts are fine when the context makes them unambiguous ("run the tests", "yes, do that").
+Judge the prompt for its moment. Don't take points off for things the moment doesn't need: after
+the code is written, "run the tests" is a strong prompt.
+
+Score on this scale and use all of it; most prompts are not a 6 or a 7:
+- 10: couldn't realistically be better at this moment.
+- 8-9: clear and right-sized; only small tweaks.
+- 6-7: works, but leaves out something that would have saved a turn or caught a mistake.
+- 4-5: vague or overscoped; the assistant has to guess things that matter.
+- 2-3: hands the problem to the assistant, or gives it nothing to go on.
+- 1: counterproductive (e.g. asks it to read the hidden tests).
+Calibration: "run the tests" right after an implementation: 8. "write the whole solution": 2.
+"Implement suggest() with the sorted list we agreed on, only in solution.py, then run test_mine.py": 9.
+Decide what worked and what to fix first, then the score.
 
 Write the better prompt as the candidate should have sent it at this exact moment: same intent,
-realistic length, their voice. Improve how they ask, not what they know: don't add algorithmic
-insights they haven't shown; use a placeholder like <your approach> for a decision only they can
-make. If the prompt was already strong, say so and keep the better prompt close to the original.
+their voice, about as long as the original and never over the word limit given below. A better prompt is sharper, not
+longer: cut what the assistant already knows from the conversation. Improve how they ask, not
+what they know: don't add algorithmic insights they haven't shown; use a placeholder like
+<your approach> for a decision only they can make. For a 9 or 10, the better prompt can be the
+original.
 """
 
 COACH_SCHEMA = {
     "type": "object",
     "properties": {
-        "grade": {"type": "string", "enum": ["A", "B", "C", "D", "F"]},
-        "score": {"type": "integer", "minimum": 1, "maximum": 10},
-        "verdict": {"type": "string", "description": "One sentence."},
         "good": {"type": "array", "items": {"type": "string"}, "description": "What worked, 0-3 short points."},
         "missing": {"type": "array", "items": {"type": "string"}, "description": "What to fix, 0-3 short points."},
+        "score": {"type": "integer", "minimum": 1, "maximum": 10},
+        "verdict": {"type": "string", "description": "One sentence."},
         "better_prompt": {"type": "string"},
     },
-    "required": ["grade", "score", "verdict", "good", "missing", "better_prompt"],
+    "required": ["good", "missing", "score", "verdict", "better_prompt"],
 }
+
+
+def letter(score):
+    return "A" if score >= 9 else "B" if score >= 7 else "C" if score >= 5 else "D" if score >= 3 else "F"
+
+
+def word_limit(prompt):
+    """The better prompt may be at most 1.5x as long; a few words more for one-liners."""
+    n = len(prompt.split())
+    return max(round(n * 1.5), n + 5)
 
 
 class coach_lock:
@@ -593,10 +618,9 @@ def conversation_before(d, t, limit=12000):
     return text[-limit:] if text else "(no earlier messages)"
 
 
-def cmd_coach(args):
-    d = Path(args.dir)
+def grade_prompt(d, entry, retry=""):
+    """Ask claude -p to grade one prompt: returns the fields to merge into its coaching entry."""
     s = load_session(d)
-    entry = next(e for e in load_coaching(d) if e["n"] == args.n)
     main = d / s.get("main", "solution.py")
     code = main.read_text()[:8000] if main.exists() else ""
     context = "\n\n".join([
@@ -605,22 +629,35 @@ def cmd_coach(args):
         f"## Current {main.name}\n```python\n{code}\n```",
         "## Conversation so far\n" + conversation_before(d, parse_ts(entry["t"])),
         "## The prompt to grade\n" + entry["prompt"],
+        f"Word limit for the better prompt: {word_limit(entry['prompt'])} words.",
+        retry,
     ])
-    result = {"status": "error", "error": "claude CLI not found"}
     claude = s.get("claude") or shutil.which("claude")
-    if claude:
-        # Outside the session folder and without project settings, so this run doesn't trigger
-        # the hook again or show up in the session transcript.
-        proc = subprocess.run(
-            [claude, "-p", "--model", COACH_MODEL, "--tools", "", "--no-session-persistence",
-             "--setting-sources", "user", "--output-format", "json", "--json-schema", json.dumps(COACH_SCHEMA),
-             "Grade the prompt as instructed in the input."],
-            input=context, capture_output=True, text=True, cwd=tempfile.gettempdir(), timeout=300)
-        try:
-            out = json.loads(proc.stdout)
-            result = {"status": "done", **out["structured_output"]}
-        except (json.JSONDecodeError, KeyError, TypeError):
-            result = {"status": "error", "error": (proc.stderr or proc.stdout).strip()[-300:] or "no output"}
+    if not claude:
+        return {"status": "error", "error": "claude CLI not found"}
+    # Outside the session folder and without project settings, so this run doesn't trigger
+    # the hook again or show up in the session transcript.
+    proc = subprocess.run(
+        [claude, "-p", "--model", COACH_MODEL, "--tools", "", "--no-session-persistence",
+         "--setting-sources", "user", "--output-format", "json", "--json-schema", json.dumps(COACH_SCHEMA),
+         "Grade the prompt as instructed in the input."],
+        input=context, capture_output=True, text=True, cwd=tempfile.gettempdir(), timeout=300)
+    try:
+        graded = json.loads(proc.stdout)["structured_output"]
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return {"status": "error", "error": (proc.stderr or proc.stdout).strip()[-300:] or "no output"}
+    words, limit = len(graded["better_prompt"].split()), word_limit(entry["prompt"])
+    if words > limit and not retry:
+        return grade_prompt(d, entry, retry=f"Your last better prompt had {words} words, over the limit of "
+                            f"{limit}. Grade again and keep the better prompt within {limit} words:\n\n"
+                            + graded["better_prompt"])
+    return {"status": "done", **graded, "grade": letter(graded["score"])}
+
+
+def cmd_coach(args):
+    d = Path(args.dir)
+    entry = next(e for e in load_coaching(d) if e["n"] == args.n)
+    result = grade_prompt(d, entry)
     with coach_lock(d):
         entries = load_coaching(d)
         for e in entries:

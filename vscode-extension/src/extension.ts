@@ -551,7 +551,7 @@ async function openClaude() {
   // `source .../activate` into Claude's prompt. show() still reveals the terminal.
   const term = vscode.window.createTerminal({ name: `Claude · ${s.session}`, cwd: s.dir, hideFromUser: true });
   term.show();
-  // Activate the venv too, so `python -m pytest test_mine.py` works in this terminal after Claude exits.
+  // Activate the venv too, so `python3 -m pytest test_mine.py` works in this terminal after Claude exits.
   const activate = path.join(path.dirname(python(root(extensionContext))), "activate");
   // The session's CLAUDE.md doubles as a system prompt, which weighs more than memory files.
   const rules = fs.existsSync(path.join(s.dir, "CLAUDE.md")) ? " --append-system-prompt-file CLAUDE.md" : "";
