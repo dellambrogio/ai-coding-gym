@@ -1,0 +1,12 @@
+# COST + 2
+# COST - 3
+# COST * 11
+# COST / 17
+# EXPECTED_TIME 11
+# EXPECTED_MEM 1
+
+tmp1 = 8 + 2
+tmp2 = tmp1 * var1
+tmp3 = tmp2 + 0
+tmp4 = 7 - 7
+res = tmp3 + tmp4

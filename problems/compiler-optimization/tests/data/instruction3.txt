@@ -1,0 +1,10 @@
+# COST + 3
+# COST - 4
+# COST * 6
+# COST / 8
+# EXPECTED_TIME 16
+# EXPECTED_MEM 1
+
+res1 = var1 + var2 * var3
+res2 = res1 - var4
+res = res2 + 5

@@ -1,0 +1,14 @@
+# COST + 5
+# COST - 7
+# COST * 13
+# COST / 19
+# EXPECTED_TIME 38
+# EXPECTED_MEM 2
+
+# Mixed precedence and simplification.
+
+res1 = 10 * var2
+res2 = var3 * 100 - var4
+res3 = res1 / 1
+dead = 9 / 3
+res = res2 + res3 + 0

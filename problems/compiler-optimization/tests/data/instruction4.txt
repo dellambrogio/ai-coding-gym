@@ -1,0 +1,11 @@
+# COST + 1
+# COST - 2
+# COST * 8
+# COST / 13
+# EXPECTED_TIME 3
+# EXPECTED_MEM 1
+
+keep = var1 + var2
+dead1 = var3 * var4
+dead2 = dead1 / var5
+res = keep - var6

@@ -1,0 +1,137 @@
+{
+  "name": "ai-coding-gym",
+  "displayName": "AI Coding Gym",
+  "description": "AI Coding Gym: timed mock AI-assisted coding interviews with staged problems, hidden tests and a Claude review.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "private": true,
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "aiCodingGym.menu",
+        "title": "AI Coding Gym: Menu",
+        "icon": "$(list-unordered)"
+      },
+      {
+        "command": "aiCodingGym.start",
+        "title": "AI Coding Gym: Start"
+      },
+      {
+        "command": "aiCodingGym.check",
+        "title": "AI Coding Gym: Run Hidden Tests",
+        "icon": "$(beaker)"
+      },
+      {
+        "command": "aiCodingGym.next",
+        "title": "AI Coding Gym: Next Part",
+        "icon": "$(arrow-right)"
+      },
+      {
+        "command": "aiCodingGym.showProblem",
+        "title": "AI Coding Gym: Show Problem"
+      },
+      {
+        "command": "aiCodingGym.openClaude",
+        "title": "AI Coding Gym: Open Claude in Session"
+      },
+      {
+        "command": "aiCodingGym.finish",
+        "title": "AI Coding Gym: Finish"
+      },
+      {
+        "command": "aiCodingGym.review",
+        "title": "AI Coding Gym: Get Claude Review"
+      },
+      {
+        "command": "aiCodingGym.discard",
+        "title": "AI Coding Gym: Discard Current Session"
+      },
+      {
+        "command": "aiCodingGym.clean",
+        "title": "AI Coding Gym: Delete All Previous Sessions"
+      },
+      {
+        "command": "aiCodingGym.back",
+        "title": "AI Coding Gym: Back to Previous Folder"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "aiCodingGym.check",
+        "key": "ctrl+alt+t"
+      }
+    ],
+    "configuration": {
+      "title": "AI Coding Gym",
+      "properties": {
+        "aiCodingGym.root": {
+          "type": "string",
+          "default": "",
+          "description": "Folder containing gym.py. Defaults to the folder above this extension."
+        },
+        "aiCodingGym.python": {
+          "type": "string",
+          "default": "",
+          "description": "Python interpreter with pytest. Defaults to a .venv next to or above the root, else python3."
+        },
+        "aiCodingGym.launchClaude": {
+          "type": "boolean",
+          "default": true,
+          "description": "Open a terminal running Claude Code in the session folder when a session starts."
+        },
+        "aiCodingGym.claudePath": {
+          "type": "string",
+          "default": "",
+          "description": "Full path to the claude CLI. Defaults to searching PATH and ~/.local/bin."
+        }
+      }
+    },
+    "views": {
+      "explorer": [
+        {
+          "id": "aiCodingGym.session",
+          "name": "AI Coding Gym"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "aiCodingGym.check",
+          "when": "view == aiCodingGym.session",
+          "group": "navigation@1"
+        },
+        {
+          "command": "aiCodingGym.next",
+          "when": "view == aiCodingGym.session",
+          "group": "navigation@2"
+        },
+        {
+          "command": "aiCodingGym.menu",
+          "when": "view == aiCodingGym.session",
+          "group": "navigation@3"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -w -p .",
+    "package": "npx --yes @vscode/vsce@3.2.1 package --allow-missing-repository --skip-license"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "~1.90.0",
+    "typescript": "^5.4.0"
+  }
+}
